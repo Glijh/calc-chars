@@ -2193,7 +2193,33 @@ class AShareMarket:
         data[universe] = np.nan
 
         return data
-
+    def calc_a2me(self):
+        """
+        计算公司在一个月内股票的资产市值比率（A2ME）
+        A2ME = 总资产 / 市值
+        总资产取自FS_Combas的A001000000字段，市值取自TRD_Mnth的Msmvosd字段
+        """
+        # 获取月末市值
+        market_equity = self.get_data('TRD_Mnth', 'Msmvosd')
+        # 获取月度总资产（季度数据前向填充到月）
+        total_asset = self.get_data('FS_Combas', 'A001000000', fs_freq='q')
+        total_asset = total_asset.fillna(method='ffill')
+        # 对齐索引和股票代码
+        total_asset = total_asset.reindex_like(market_equity)
+        # 计算A2ME
+        a2me = total_asset / market_equity
+        return a2me
+    def calc_at(self):
+    """
+    计算公司在一个月内股票的总资产（AT）
+        AT = 总资产（资产负债表A001000000字段）
+    """
+        # 获取总资产（季度数据，前向填充到月度）
+        total_asset = self.get_data('FS_Combas', 'A001000000', fs_freq='q')
+        # 前向填充到每个月
+        total_asset = total_asset.fillna(method='ffill')
+        # 只返回总资产
+        return total_asset
 # end class
 
 # ##############################################################################
