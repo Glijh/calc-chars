@@ -2193,23 +2193,6 @@ class AShareMarket:
         data[universe] = np.nan
 
         return data
-        def calc_a2me(self):
-        """
-        计算公司在一个月内股票的资产市值比率（A2ME）
-        A2ME = 总资产 / 市值
-        总资产取自FS_Combas的A001000000字段，市值取自TRD_Mnth的Msmvosd字段
-        """
-        # 获取月末市值
-        market_equity = self.get_data('TRD_Mnth', 'Msmvosd')
-        # 获取月度总资产（季度数据前向填充到月）
-        total_asset = self.get_data('FS_Combas', 'A001000000', fs_freq='q')
-        total_asset = total_asset.fillna(method='ffill')
-        # 对齐索引和股票代码
-        total_asset = total_asset.reindex_like(market_equity)
-        # 计算A2ME
-        a2me = total_asset / market_equity
-        return a2me
-
 ->
 
     def calc_a2me(self):
@@ -2347,6 +2330,61 @@ class AShareMarket:
         suv = suv.set_index('Trdmnt')
 
         return suv
+    def calc_lturnover(self):
+        # 获取月成交量
+        vol = self.get_data('TRD_Mnth', 'Mnshrtrd')
+        # 获取月流通股本
+        try:
+            shrout = self.get_data('TRD_Mnth', 'Mnshrout')
+        except:
+            # 若无流通股本字段，则用市值/收盘价近似
+            market_value = self.get_data('TRD_Mnth', 'Msmvosd')
+            price = self.get_data('TRD_Mnth', 'Mclsprc')
+            shrout = market_value / price
+        # 换手率 = 上月成交量 / 本月流通股本
+        lturnover = vol.shift(1) / shrout
+        return lturnover
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+
+def calc_mktbeta(self, win=60, min_obs=24):
+    """
+    计算MktBeta（Market Beta）因子
+    用过去60个月（最少24个月）超额收益对市场超额收益做回归，回归系数即为Beta
+    """
+    # 获取月度数据
+    stock_ret = self.get_data('TRD_Mnth', 'Mretwd')
+    mkt_ret = self.get_data('TRD_Cndalym', 'Cdretwdos')
+    rf = self.get_data('TRD_Nrrate', 'Nrrmtdt')  # 月无风险利率
+
+    # 对齐索引
+    mkt_ret = mkt_ret.loc[stock_ret.index]
+    rf = rf.loc[stock_ret.index]
+
+    # 计算超额收益
+    stock_excess = stock_ret - rf.values
+    mkt_excess = mkt_ret - rf.values
+
+    beta = pd.DataFrame(index=stock_ret.index, columns=stock_ret.columns)
+
+    for stock in stock_ret.columns:
+        y = stock_excess[stock]
+        x = mkt_excess
+        for i in range(win, len(y)+1):
+            y_win = y.iloc[i-win:i]
+            x_win = x.iloc[i-win:i]
+            if y_win.count() >= min_obs and x_win.count() >= min_obs:
+                X = sm.add_constant(x_win)
+                try:
+                    model = sm.OLS(y_win, X).fit()
+                    beta.iloc[i-1, beta.columns.get_loc(stock)] = model.params[1]
+                except:
+                    beta.iloc[i-1, beta.columns.get_loc(stock)] = np.nan
+            else:
+                beta.iloc[i-1, beta.columns.get_loc(stock)] = np.nan
+
+    return beta
 # end class
 
 # ##############################################################################
