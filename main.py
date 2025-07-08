@@ -2193,7 +2193,7 @@ class AShareMarket:
         data[universe] = np.nan
 
         return data
-    def calc_a2me(self):
+        def calc_a2me(self):
         """
         计算公司在一个月内股票的资产市值比率（A2ME）
         A2ME = 总资产 / 市值
@@ -2201,6 +2201,26 @@ class AShareMarket:
         """
         # 获取月末市值
         market_equity = self.get_data('TRD_Mnth', 'Msmvosd')
+        # 获取月度总资产（季度数据前向填充到月）
+        total_asset = self.get_data('FS_Combas', 'A001000000', fs_freq='q')
+        total_asset = total_asset.fillna(method='ffill')
+        # 对齐索引和股票代码
+        total_asset = total_asset.reindex_like(market_equity)
+        # 计算A2ME
+        a2me = total_asset / market_equity
+        return a2me
+
+->
+
+    def calc_a2me(self):
+        # 获取月收盘价
+        price = self.get_data('TRD_Mnth', 'Mclsprc')
+        # 获取流通市值
+        market_value = self.get_data('TRD_Mnth', 'Msmvosd')
+        # 计算流通股数 = 流通市值 / 收盘价
+        shares_outstanding = market_value / price
+        # 计算市值 = 收盘价 × 流通股数
+        market_equity = price * shares_outstanding
         # 获取月度总资产（季度数据前向填充到月）
         total_asset = self.get_data('FS_Combas', 'A001000000', fs_freq='q')
         total_asset = total_asset.fillna(method='ffill')
@@ -2220,6 +2240,113 @@ class AShareMarket:
         total_asset = total_asset.fillna(method='ffill')
         # 只返回总资产
         return total_asset
+
+
+    def calc_fp_beta(self, corr_win=750, vol_win=250, min_corr_obs=750, min_vol_obs=120):
+        daily_ret = self.get_data('TRD_Dalyr', 'Dretwd')
+        market_ret = self.get_data('TRD_Cndalym', 'Cdretwdos')
+        rf = self.get_data('TRD_Nrrate', 'Nrrdaydt')
+
+    # 对齐索引
+        market_ret = market_ret.loc[daily_ret.index]
+        rf = rf.loc[daily_ret.index]
+    # 计算超额收益
+        stock_excess = np.log(1 + daily_ret - rf.values)
+        market_excess = np.log(1 + market_ret - rf.values)
+    # 计算3日对数超额收益
+        stock_excess_3d = stock_excess.rolling(3).sum()
+        market_excess_3d = market_excess.rolling(3).sum()
+    # 相关性部分（750天窗口）
+        corr = stock_excess_3d.rolling(corr_win, min_periods=min_corr_obs).corr(market_excess_3d)
+    # 波动率部分（250天窗口）
+        stock_vol = stock_excess.rolling(vol_win, min_periods=min_vol_obs).std()
+        market_vol = market_excess.rolling(vol_win, min_periods=min_vol_obs).std()
+    # 计算Beta
+        beta = corr * (stock_vol / market_vol)
+    # 转为月度（每月最后一天）
+        beta['Trdmnt'] = beta.index
+        beta.Trdmnt = beta.Trdmnt.apply(lambda x: x[:6])
+        beta = beta.drop_duplicates(subset=['Trdmnt'], keep='last')
+        beta = beta.set_index('Trdmnt')
+        
+        return beta
+    def calc_lme(self):
+        price = self.get_data('TRD_Mnth', 'Mclsprc')
+        try:
+            shares = self.get_data('TRD_Mnth', 'Mnshrout')  # 假如有流通股本字段
+        except:
+        # 若无流通股本字段，则用市值/收盘价近似
+            market_value = self.get_data('TRD_Mnth', 'Msmvosd')
+            shares = market_value / price
+
+        lme = price * shares
+        lme = lme.shift(1)
+        return lme
+    def calc_lturnover(self):
+        vol = self.get_data('TRD_Mnth', 'Mnshrtrd')
+        try:
+            shrout = self.get_data('TRD_Mnth', 'Mnshrout')
+        except:
+            market_value = self.get_data('TRD_Mnth', 'Msmvosd')
+            price = self.get_data('TRD_Mnth', 'Mclsprc')
+            shrout = market_value / price
+        lturnover = vol.shift(1) / shrout
+        return lturnover
+        
+    import numpy as np
+    import pandas as pd
+    import statsmodels.api as sm
+
+    def calc_suv(self):
+    
+        # 获取每日成交量和收益率
+        volume = self.get_data('TRD_Dalyr', 'Dnvaltrd')  # 或 'Dnshrtrd'
+        ret = self.get_data('TRD_Dalyr', 'Dretwd')
+
+        suv = pd.DataFrame(index=volume.index, columns=volume.columns)
+
+        for stock in volume.columns:
+            vol = volume[stock]
+            r = ret[stock]
+
+            # 构造回归自变量
+            r_pos = np.abs(r.where(r > 0, 0))
+            r_neg = np.abs(r.where(r < 0, 0))
+
+            X = pd.DataFrame({
+                'const': 1,
+                'r_pos': r_pos,
+                'r_neg': r_neg
+            })
+            y = vol
+
+            # 滚动回归（按月分组）
+            months = y.index.str[:6].unique()
+            for m in months:
+                idx = y.index.str[:6] == m
+                if idx.sum() < 10:  # 至少10天
+                    continue
+                X_m = X[idx]
+                y_m = y[idx]
+                try:
+                    model = sm.OLS(y_m, X_m).fit()
+                    y_pred = model.predict(X_m)
+                    resid = y_m - y_pred
+                    std_resid = resid.std()
+                    if std_resid > 0:
+                        suv.loc[idx, stock] = (y_m - y_pred) / std_resid
+                    else:
+                        suv.loc[idx, stock] = np.nan
+                except:
+                    suv.loc[idx, stock] = np.nan
+
+        # 转为月度（每月最后一天）
+        suv['Trdmnt'] = suv.index
+        suv.Trdmnt = suv.Trdmnt.apply(lambda x: x[:6])
+        suv = suv.drop_duplicates(subset=['Trdmnt'], keep='last')
+        suv = suv.set_index('Trdmnt')
+
+        return suv
 # end class
 
 # ##############################################################################
